@@ -1,6 +1,7 @@
 import { Context, h, Schema } from 'koishi'
 import MarkdownIt from 'markdown-it'
 import { XMLParser } from 'fast-xml-parser'
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
@@ -14,6 +15,12 @@ export const inject = {
 const APP_ID = 730
 const STEAM_RSS_URL = `https://store.steampowered.com/feeds/news/app/${APP_ID}/`
 const STATE_LIMIT = 1000
+const RSS_LIST_CACHE_TTL_MS = 15 * 1000
+const RUNTIME_CACHE_CLEAR_INTERVAL_MS = 5 * 60 * 1000
+const TRANSLATE_TIMEOUT_MS = 90 * 1000
+const ASSET_DIR = path.resolve(__dirname, '..', 'assets')
+const BRAND_LOGO_PATH = path.join(ASSET_DIR, 'brand-logo.png')
+const GITHUB_QRCODE_PATH = path.join(ASSET_DIR, 'github-qrcode.png')
 
 const loggerName = 'cs2-update-log'
 
@@ -69,6 +76,20 @@ interface TargetConfig {
 interface TranslateResult {
   title: string
   markdown: string
+}
+
+interface RuntimeCache {
+  rssFetchedAt: number
+  rssItems: SteamNewsItem[]
+  newsByGid: Map<string, SteamNewsItem>
+  translations: Map<string, TranslateResult>
+  cardImages: Map<string, Buffer>
+  assetDataUris: Map<string, string>
+}
+
+interface CardAssets {
+  brandLogoDataUri: string
+  githubQrDataUri: string
 }
 
 export interface Config {
@@ -132,8 +153,26 @@ export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(loggerName)
   const statePath = resolveStatePath(ctx, config.stateFile)
   const knownGids = new Set<string>()
+  const cache: RuntimeCache = {
+    rssFetchedAt: 0,
+    rssItems: [],
+    newsByGid: new Map(),
+    translations: new Map(),
+    cardImages: new Map(),
+    assetDataUris: new Map(),
+  }
   let stateInitialized = false
   let polling = false
+
+  function clearRuntimeCache(reason: string) {
+    cache.rssFetchedAt = 0
+    cache.rssItems = []
+    cache.newsByGid.clear()
+    cache.translations.clear()
+    cache.cardImages.clear()
+    cache.assetDataUris.clear()
+    logger.info('已清理运行时缓存：%s', reason)
+  }
 
   async function loadState() {
     try {
@@ -175,6 +214,11 @@ export function apply(ctx: Context, config: Config) {
 
   async function fetchNews(): Promise<SteamNewsItem[]> {
     try {
+      if (cache.rssItems.length && Date.now() - cache.rssFetchedAt < RSS_LIST_CACHE_TTL_MS) {
+        logger.debug('使用 RSS 短时缓存：items=%d', cache.rssItems.length)
+        return cache.rssItems.slice(0, config.count)
+      }
+
       const xml = await ctx.http.get<string>(STEAM_RSS_URL, {
         headers: {
           Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
@@ -188,10 +232,23 @@ export function apply(ctx: Context, config: Config) {
       const rawItems = parsed.rss?.channel?.item
       const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : []
 
-      return items
+      const parsedItems = items
         .map(parseRssItem)
         .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
-        .slice(0, config.count)
+
+      const cachedItems = parsedItems.map((item) => {
+        const cached = cache.newsByGid.get(item.gid)
+        if (cached && cached.title === item.title && cached.content === item.content && cached.url === item.url && cached.date === item.date) {
+          return cached
+        }
+        cache.newsByGid.set(item.gid, item)
+        return item
+      })
+
+      cache.rssFetchedAt = Date.now()
+      cache.rssItems = cachedItems
+
+      return cachedItems.slice(0, config.count)
     } catch (error) {
       logger.error('拉取 Steam CS2 RSS 失败：url=%s\n%s', STEAM_RSS_URL, formatError(error))
       return []
@@ -281,7 +338,15 @@ export function apply(ctx: Context, config: Config) {
     }
 
     try {
-      const png = await renderCard(puppeteer, news, title, bodyMarkdown)
+      const cacheKey = hashCacheKey('card-image', news.item.gid, news.category, config.brandName, config.siteName, title, bodyMarkdown)
+      let png = cache.cardImages.get(cacheKey)
+      if (!png) {
+        png = await renderCard(puppeteer, news, title, bodyMarkdown)
+        cache.cardImages.set(cacheKey, png)
+      } else {
+        logger.debug('使用长图缓存：gid=%s title=%s', news.item.gid, news.item.title)
+      }
+
       const image = h.image(png, 'image/png')
       return config.appendLink ? [image, '\n', link] : image
     } catch (error) {
@@ -291,7 +356,8 @@ export function apply(ctx: Context, config: Config) {
   }
 
   async function renderCard(puppeteer: PuppeteerService, news: ClassifiedNews, title: string, bodyMarkdown: string): Promise<Buffer> {
-    const html = buildCardHtml(news, title, bodyMarkdown, config)
+    const assets = await loadCardAssets()
+    const html = buildCardHtml(news, title, bodyMarkdown, config, assets)
     const page = await puppeteer.page()
 
     try {
@@ -328,6 +394,13 @@ export function apply(ctx: Context, config: Config) {
       return { title, markdown: bodyMarkdown }
     }
 
+    const cacheKey = hashCacheKey('translation', config.translateApiEndpoint, config.translateModel, config.translatePrompt, title, bodyMarkdown)
+    const cached = cache.translations.get(cacheKey)
+    if (cached) {
+      logger.debug('使用 AI 翻译缓存：title=%s', title)
+      return cached
+    }
+
     try {
       const response = await ctx.http.post<ChatCompletionResponse>(config.translateApiEndpoint, {
         model: config.translateModel,
@@ -356,20 +429,49 @@ export function apply(ctx: Context, config: Config) {
           Authorization: `Bearer ${config.translateApiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 60000,
+        timeout: TRANSLATE_TIMEOUT_MS,
       })
 
       const content = response?.choices?.[0]?.message?.content?.trim()
       if (!content) throw new Error('empty translation response')
 
       const parsed = parseJsonObject(content) as Partial<TranslateResult>
-      return {
+      const translated = {
         title: parsed.title || title,
         markdown: parsed.markdown || bodyMarkdown,
       }
+      cache.translations.set(cacheKey, translated)
+      return translated
     } catch (error) {
       logger.error('AI 翻译失败，将推送原文：%s', formatError(error))
       return { title, markdown: bodyMarkdown }
+    }
+  }
+
+  async function loadCardAssets(): Promise<CardAssets> {
+    const [brandLogoDataUri, githubQrDataUri] = await Promise.all([
+      loadAssetDataUri('brand-logo', BRAND_LOGO_PATH, 'image/png'),
+      loadAssetDataUri('github-qrcode', GITHUB_QRCODE_PATH, 'image/png'),
+    ])
+
+    return {
+      brandLogoDataUri,
+      githubQrDataUri,
+    }
+  }
+
+  async function loadAssetDataUri(cacheKey: string, filePath: string, mimeType: string) {
+    const cached = cache.assetDataUris.get(cacheKey)
+    if (cached) return cached
+
+    try {
+      const buffer = await fs.readFile(filePath)
+      const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`
+      cache.assetDataUris.set(cacheKey, dataUri)
+      return dataUri
+    } catch (error) {
+      logger.error('读取卡片资源失败：path=%s\n%s', filePath, formatError(error))
+      return ''
     }
   }
 
@@ -424,6 +526,10 @@ export function apply(ctx: Context, config: Config) {
   ctx.setInterval(() => {
     void pollAndPush('timer')
   }, Math.max(5, config.interval) * 1000)
+
+  ctx.setInterval(() => {
+    clearRuntimeCache('short cache interval')
+  }, RUNTIME_CACHE_CLEAR_INTERVAL_MS)
 }
 
 function classifyNews(item: SteamNewsItem): ClassifiedNews {
@@ -524,6 +630,15 @@ function steamContentToMarkdown(input: string): string {
     .trim()
 }
 
+function hashCacheKey(...parts: string[]) {
+  const hash = createHash('sha256')
+  for (const part of parts) {
+    hash.update(part)
+    hash.update('\0')
+  }
+  return hash.digest('hex')
+}
+
 function buildTextMessage(news: ClassifiedNews, title: string, bodyMarkdown: string, link: string) {
   const categoryName = news.category === 'update' ? 'CS2 官方更新日志' : 'CS2 官方公告'
   const parts = [
@@ -541,7 +656,7 @@ function buildTextMessage(news: ClassifiedNews, title: string, bodyMarkdown: str
   return parts.join('\n')
 }
 
-function buildCardHtml(news: ClassifiedNews, title: string, bodyMarkdown: string, config: Config): string {
+function buildCardHtml(news: ClassifiedNews, title: string, bodyMarkdown: string, config: Config, assets: CardAssets): string {
   const categoryName = news.category === 'update' ? 'CS2 官方更新日志' : 'CS2 官方公告'
   const categoryTag = news.category === 'update' ? 'UPDATE LOG' : 'ANNOUNCEMENT'
   const rendered = markdown.render(bodyMarkdown)
@@ -606,6 +721,13 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: inset 0 0 0 5px rgba(255, 255, 255, 0.03);
   font-size: 26px;
+  overflow: hidden;
+}
+.avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .brand-title {
   font-size: 21px;
@@ -746,6 +868,13 @@ body {
   font-weight: 900;
   color: #ffffff;
 }
+.site-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  min-width: 230px;
+}
 .site {
   text-align: right;
   min-width: 160px;
@@ -760,13 +889,22 @@ body {
   color: #78b7ff;
   font-size: 14px;
 }
+.qr-code {
+  width: 62px;
+  height: 62px;
+  flex: 0 0 auto;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
 </style>
 </head>
 <body>
   <article id="card">
     <header class="topbar">
       <div class="brand">
-        <div class="avatar">CS</div>
+        <div class="avatar">${assets.brandLogoDataUri ? `<img src="${assets.brandLogoDataUri}" alt="">` : 'CS'}</div>
         <div>
           <div class="brand-title">${escapeHtml(config.brandName)}</div>
           <div class="brand-subtitle">CS2 更新日志工具</div>
@@ -787,9 +925,12 @@ body {
         <div class="published-label">PUBLISHED AT</div>
         <div class="published-time">${escapeHtml(publishedAt)}</div>
       </div>
-      <div class="site">
-        <div class="site-name">${escapeHtml(config.siteName)}</div>
-        <div class="author">${escapeHtml(author)}</div>
+      <div class="site-wrap">
+        <div class="site">
+          <div class="site-name">${escapeHtml(config.siteName)}</div>
+          <div class="author">${escapeHtml(author)}</div>
+        </div>
+        ${assets.githubQrDataUri ? `<img class="qr-code" src="${assets.githubQrDataUri}" alt="">` : ''}
       </div>
     </footer>
   </article>

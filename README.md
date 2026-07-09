@@ -14,13 +14,14 @@ Koishi QQ 机器人插件，用于轮询 CS2 官方 Steam 公告流，按 `gid` 
   - 或正文包含 `[MAPS]`、`[GAMEPLAY]`、`[MISC]`、`[AUDIO]`、`[ITEMS]`、`[WORKSHOP]`、`[PREMIER]` 等更新分区
 - 支持纯文本推送或 Puppeteer 深色长图卡片推送。
 - 支持 OpenAI-compatible Chat Completions API 翻译。
+- 内置短时运行时缓存：RSS 列表缓存 15 秒，新闻内容、AI 翻译结果、长图 PNG 和卡片静态资源每 5 分钟清理一次，减少连续测试/重复推送的开销。
 - 提供 `cs2log.check`、`cs2log.push` 与 `cs2log.test` 命令。
 
 ## 配置要点
 
 - `targets` 必须配置目标 QQ 群，其中 `channelId` 一般填写群号。
 - `picture` 开启后需要安装并启用 Puppeteer 服务插件，例如 `@koishijs/plugin-puppeteer`。
-- `trans` 开启后需要填写 `translateApiKey`；默认接口是 OpenAI Chat Completions 格式，可按你的服务商修改 `translateApiEndpoint` 和 `translateModel`。
+- `trans` 开启后需要填写 `translateApiKey`；默认接口是 OpenAI Chat Completions 格式，可按你的服务商修改 `translateApiEndpoint` 和 `translateModel`。AI 翻译请求超时时间为 90 秒。
 
 ## 命令
 
