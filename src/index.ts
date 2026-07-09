@@ -176,7 +176,12 @@ export function apply(ctx: Context, config: Config) {
   async function fetchNews(): Promise<SteamNewsItem[]> {
     try {
       const xml = await ctx.http.get<string>(STEAM_RSS_URL, {
+        headers: {
+          Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+          'User-Agent': 'koishi-plugin-cs2-update-log/2.1',
+        },
         responseType: 'text',
+        timeout: 30000,
       })
 
       const parsed = rssParser.parse(xml) as RssFeed
@@ -188,7 +193,7 @@ export function apply(ctx: Context, config: Config) {
         .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
         .slice(0, config.count)
     } catch (error) {
-      logger.error('拉取 Steam CS2 RSS 失败：%s', formatError(error))
+      logger.error('拉取 Steam CS2 RSS 失败：url=%s\n%s', STEAM_RSS_URL, formatError(error))
       return []
     }
   }
@@ -893,8 +898,84 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 function formatError(error: unknown) {
-  if (error instanceof Error) return error.stack || error.message
-  return String(error)
+  const lines: string[] = []
+  appendErrorDetails(lines, error)
+  return lines.join('\n')
+}
+
+function appendErrorDetails(lines: string[], error: unknown, label = 'error', depth = 0, seen = new Set<unknown>()) {
+  if (error == null || typeof error !== 'object') {
+    lines.push(`${label}: ${String(error)}`)
+    return
+  }
+
+  if (seen.has(error)) {
+    lines.push(`${label}: [Circular]`)
+    return
+  }
+
+  seen.add(error)
+  const record = error as Record<string, unknown>
+  const name = typeof record.name === 'string' ? record.name : error instanceof Error ? error.name : 'Error'
+  const message = typeof record.message === 'string' ? record.message : String(error)
+  lines.push(`${label}: ${name}: ${message}`)
+
+  const details = collectErrorDetails(record)
+  if (details.length) lines.push(`${label} details: ${details.join(', ')}`)
+
+  const stack = typeof record.stack === 'string' ? record.stack : ''
+  const stackLines = stack.split(/\r?\n/).slice(1, 7).map((line) => line.trim()).filter(Boolean)
+  if (stackLines.length) lines.push(`${label} stack:\n  ${stackLines.join('\n  ')}`)
+
+  appendNestedObjectDetails(lines, record, 'request', label)
+  appendNestedObjectDetails(lines, record, 'response', label)
+
+  const cause = record.cause
+  if (cause !== undefined && depth < 5) {
+    appendErrorDetails(lines, cause, `${label}.cause`, depth + 1, seen)
+  }
+}
+
+function collectErrorDetails(record: Record<string, unknown>) {
+  const keys = [
+    'code',
+    'errno',
+    'type',
+    'syscall',
+    'hostname',
+    'host',
+    'address',
+    'port',
+    'method',
+    'url',
+    'status',
+    'statusCode',
+    'statusText',
+  ]
+
+  const details: string[] = []
+  for (const key of keys) {
+    const value = record[key]
+    if (value == null) continue
+    const rendered = renderLogValue(value)
+    if (rendered) details.push(`${key}=${rendered}`)
+  }
+
+  return details
+}
+
+function appendNestedObjectDetails(lines: string[], record: Record<string, unknown>, key: string, label: string) {
+  const value = record[key]
+  if (!value || typeof value !== 'object') return
+
+  const details = collectErrorDetails(value as Record<string, unknown>)
+  if (details.length) lines.push(`${label}.${key} details: ${details.join(', ')}`)
+}
+
+function renderLogValue(value: unknown) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value)
+  return undefined
 }
 
 interface PuppeteerService {
