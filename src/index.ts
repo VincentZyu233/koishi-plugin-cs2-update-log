@@ -234,16 +234,20 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  async function pushNews(news: ClassifiedNews) {
+  async function buildNewsContent(news: ClassifiedNews) {
     const link = getNewsLink(news.item)
     const baseMarkdown = steamContentToMarkdown(news.item.content)
     const translated = await maybeTranslate(news.item.title, baseMarkdown)
     const displayTitle = translated.title || news.item.title
     const displayMarkdown = translated.markdown || baseMarkdown
 
-    const content = config.picture
+    return config.picture
       ? await renderOrFallbackText(news, displayTitle, displayMarkdown, link)
       : buildTextMessage(news, displayTitle, displayMarkdown, link)
+  }
+
+  async function pushNews(news: ClassifiedNews) {
+    const content = await buildNewsContent(news)
 
     if (!config.targets.length) {
       logger.warn('未配置推送目标，已跳过：%s', news.item.title)
@@ -389,16 +393,19 @@ export function apply(ctx: Context, config: Config) {
     })
 
   ctx.command('cs2log.test', '测试推送最近 2 条 CS2 官方新闻')
-    .action(async () => {
+    .action(async ({ session }) => {
+      if (!session?.bot || !session.channelId) return '测试指令需要在可发送消息的会话中使用。'
+
       const items = await fetchNews()
       const testItems = items.slice(0, 2).reverse()
       if (!testItems.length) return '没有拉取到可测试推送的 CS2 官方新闻。'
 
       for (const item of testItems) {
-        await pushNews(classifyNews(item))
+        const content = await buildNewsContent(classifyNews(item))
+        await session.bot.sendMessage(session.channelId, content)
       }
 
-      return `已触发 ${testItems.length} 条 CS2 官方新闻测试推送。本次测试不会写入 gid 判重 state。`
+      return `已向当前会话触发 ${testItems.length} 条 CS2 官方新闻测试推送。本次测试不会写入 gid 判重 state。`
     })
 
   ctx.on('ready', () => {

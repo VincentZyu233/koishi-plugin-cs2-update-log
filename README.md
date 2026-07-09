@@ -26,4 +26,4 @@ Koishi QQ 机器人插件，用于轮询 CS2 官方 Steam 公告流，按 `gid` 
 
 - `cs2log.check`：查看最近 5 条新闻的分类结果。
 - `cs2log.push`：手动检查并推送新内容。
-- `cs2log.test`：测试推送最近 2 条新闻，不写入判重 state。
+- `cs2log.test`：在输入该指令的当前群测试推送最近 2 条新闻，不写入判重 state。
