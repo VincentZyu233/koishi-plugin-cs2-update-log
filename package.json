@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-cs2-update-log",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Koishi plugin for monitoring CS2 official Steam announcements and update logs.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
