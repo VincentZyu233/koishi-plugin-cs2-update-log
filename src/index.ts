@@ -1,5 +1,6 @@
 import { Context, h, Schema } from 'koishi'
 import MarkdownIt from 'markdown-it'
+import { XMLParser } from 'fast-xml-parser'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
@@ -11,21 +12,12 @@ export const inject = {
 }
 
 const APP_ID = 730
-const FEED_NAME = 'steam_community_announcements'
-const STEAM_NEWS_API = 'https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/'
+const STEAM_RSS_URL = `https://store.steampowered.com/feeds/news/app/${APP_ID}/`
 const STATE_LIMIT = 1000
 
 const loggerName = 'cs2-update-log'
 
 type NewsCategory = 'update' | 'announcement'
-
-interface SteamNewsResponse {
-  appnews?: {
-    appid?: number
-    count?: number
-    newsitems?: SteamNewsItem[]
-  }
-}
 
 interface SteamNewsItem {
   gid: string
@@ -40,6 +32,26 @@ interface SteamNewsItem {
   feed_type?: number
   appid?: number
   tags?: string[]
+}
+
+interface RssFeed {
+  rss?: {
+    channel?: {
+      item?: RssItem | RssItem[]
+    }
+  }
+}
+
+interface RssItem {
+  title?: XmlText
+  description?: XmlText
+  link?: XmlText
+  guid?: XmlText
+  pubDate?: XmlText
+}
+
+type XmlText = string | number | {
+  '#text'?: string | number
 }
 
 interface ClassifiedNews {
@@ -110,9 +122,16 @@ const markdown = new MarkdownIt({
   breaks: true,
 })
 
+const rssParser = new XMLParser({
+  ignoreAttributes: false,
+  parseTagValue: false,
+  trimValues: true,
+})
+
 const updateTitlePattern = /\b(?:Counter-Strike 2 Update|Release Notes)\b/i
-const updateSectionPattern = /^\s*\[\s*(MAPS|GAMEPLAY|MISC|AUDIO|ITEMS|WORKSHOP|PREMIER|GRAPHICS|ANIMATION|UI|SOUND|INPUT|NETWORKING|MATCHMAKING)\s*\]\s*$/gim
-const updateSectionInlinePattern = /\[\s*(?:MAPS|GAMEPLAY|MISC|AUDIO|ITEMS|WORKSHOP|PREMIER|GRAPHICS|ANIMATION|UI|SOUND|INPUT|NETWORKING|MATCHMAKING)\s*\]/i
+const updateSectionPattern = /^\s*\[\s*(MAPS|GAMEPLAY|MISC|AUDIO|ITEMS|WORKSHOP|PREMIER|GRAPHICS|ANIMATION|UI|SOUND|INPUT|NETWORKING|MATCHMAKING|ARMORY|ENGINE|MAP SCRIPTING)\s*\]\s*$/gim
+const updateSectionInlinePattern = /\[\s*(?:MAPS|GAMEPLAY|MISC|AUDIO|ITEMS|WORKSHOP|PREMIER|GRAPHICS|ANIMATION|UI|SOUND|INPUT|NETWORKING|MATCHMAKING|ARMORY|ENGINE|MAP SCRIPTING)\s*\]/i
+const sectionHeadingPattern = /^\s*\[\s*([A-Z][A-Z0-9 &'/-]{1,48})\s*\]\s*$/gim
 
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(loggerName)
@@ -161,22 +180,20 @@ export function apply(ctx: Context, config: Config) {
 
   async function fetchNews(): Promise<SteamNewsItem[]> {
     try {
-      const response = await ctx.http.get<SteamNewsResponse>(STEAM_NEWS_API, {
-        params: {
-          appid: APP_ID,
-          count: config.count,
-          maxlength: 0,
-          format: 'json',
-          feeds: FEED_NAME,
-        },
+      const xml = await ctx.http.get<string>(STEAM_RSS_URL, {
+        responseType: 'text',
       })
 
-      const items = response?.appnews?.newsitems
-      if (!Array.isArray(items)) return []
+      const parsed = rssParser.parse(xml) as RssFeed
+      const rawItems = parsed.rss?.channel?.item
+      const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : []
 
-      return items.filter((item) => item?.gid && item?.title)
+      return items
+        .map(parseRssItem)
+        .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
+        .slice(0, config.count)
     } catch (error) {
-      logger.error('拉取 Steam CS2 新闻失败：%s', formatError(error))
+      logger.error('拉取 Steam CS2 RSS 失败：%s', formatError(error))
       return []
     }
   }
@@ -403,14 +420,67 @@ function classifyNews(item: SteamNewsItem): ClassifiedNews {
   }
 }
 
+function parseRssItem(item: RssItem): SteamNewsItem | null {
+  const title = readXmlText(item.title)
+  const url = readXmlText(item.link)
+  const guid = readXmlText(item.guid)
+  const gid = extractNewsGid(guid) || extractNewsGid(url)
+  if (!gid || !title) return null
+
+  const pubDate = readXmlText(item.pubDate)
+  const dateValue = Date.parse(pubDate)
+
+  return {
+    gid,
+    title,
+    url,
+    author: 'Valve',
+    contents: readXmlText(item.description),
+    date: Number.isFinite(dateValue) ? Math.floor(dateValue / 1000) : 0,
+    feedlabel: 'Steam News RSS',
+    feedname: 'steam_store_news_rss',
+    appid: APP_ID,
+  }
+}
+
+function readXmlText(value: XmlText | undefined): string {
+  if (value == null) return ''
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim()
+  return String(value['#text'] ?? '').trim()
+}
+
+function extractNewsGid(value: string) {
+  return value.match(/\/view\/(\d+)/)?.[1] || ''
+}
+
 function steamBbcodeToMarkdown(input: string): string {
   let output = decodeHtmlEntities(input || '')
     .replace(/\r\n?/g, '\n')
+    .replace(/\\([\[\]])/g, '$1')
 
   output = output
+    .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
+    .replace(/<div\b[^>]*class=["'][^"']*bb_h1[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi, (_, text) => `\n# ${text.trim()}\n`)
+    .replace(/<div\b[^>]*class=["'][^"']*bb_h2[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi, (_, text) => `\n## ${text.trim()}\n`)
+    .replace(/<div\b[^>]*class=["'][^"']*bb_h3[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi, (_, text) => `\n### ${text.trim()}\n`)
+    .replace(/<div\b[^>]*class=["'][^"']*bb_h[45][^"']*["'][^>]*>([\s\S]*?)<\/div>/gi, (_, text) => `\n### ${text.trim()}\n`)
+    .replace(/<p\b[^>]*class=["'][^"']*bb_paragraph[^"']*["'][^>]*>([\s\S]*?)<\/p>/gi, (_, text) => `\n${text.trim()}\n`)
+    .replace(/<li\b[^>]*>\s*/gi, '\n- ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/?(?:ul|ol)\b[^>]*>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/<strong\b[^>]*>([\s\S]*?)<\/strong>/gi, '**$1**')
+    .replace(/<b\b[^>]*>([\s\S]*?)<\/b>/gi, '**$1**')
+    .replace(/<em\b[^>]*>([\s\S]*?)<\/em>/gi, '*$1*')
+    .replace(/<i\b[^>]*>([\s\S]*?)<\/i>/gi, '*$1*')
+    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, '`$1`')
+    .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => `\n\`\`\`\n${code.trim()}\n\`\`\`\n`)
+    .replace(/<[^>]+>/g, '')
     .replace(/\[h1\]([\s\S]*?)\[\/h1\]/gi, (_, text) => `\n# ${text.trim()}\n`)
     .replace(/\[h2\]([\s\S]*?)\[\/h2\]/gi, (_, text) => `\n## ${text.trim()}\n`)
     .replace(/\[h3\]([\s\S]*?)\[\/h3\]/gi, (_, text) => `\n### ${text.trim()}\n`)
+    .replace(/\[h[45]\]([\s\S]*?)\[\/h[45]\]/gi, (_, text) => `\n### ${text.trim()}\n`)
     .replace(/\[b\]([\s\S]*?)\[\/b\]/gi, '**$1**')
     .replace(/\[strong\]([\s\S]*?)\[\/strong\]/gi, '**$1**')
     .replace(/\[i\]([\s\S]*?)\[\/i\]/gi, '*$1*')
@@ -429,8 +499,8 @@ function steamBbcodeToMarkdown(input: string): string {
     .replace(/<\/p>\s*<p>/gi, '\n\n')
     .replace(/<\/?p>/gi, '\n')
 
-  output = output.replace(updateSectionPattern, (_, section) => `\n## [${String(section).toUpperCase()}]\n`)
-  updateSectionPattern.lastIndex = 0
+  output = output.replace(sectionHeadingPattern, (_, section) => `\n## [${String(section).toUpperCase()}]\n`)
+  sectionHeadingPattern.lastIndex = 0
 
   return output
     .replace(/\n{3,}/g, '\n\n')

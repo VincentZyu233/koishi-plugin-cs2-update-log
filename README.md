@@ -6,7 +6,7 @@ Koishi QQ 机器人插件，用于轮询 CS2 官方 Steam 公告流，按 `gid` 
 
 ## 功能
 
-- 使用 Steam `ISteamNews/GetNewsForApp/v2` 拉取 AppID `730` 的官方公告流。
+- 使用 Steam Store RSS `https://store.steampowered.com/feeds/news/app/730/` 拉取 AppID `730` 的官方公告流，避开 `api.steampowered.com`。
 - 默认每 30 秒轮询一次。
 - 首次启动默认只记录历史 `gid`，不推送历史内容。
 - 自动分类：
