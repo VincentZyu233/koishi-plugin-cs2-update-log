@@ -388,6 +388,19 @@ export function apply(ctx: Context, config: Config) {
       return pushed ? `已推送 ${pushed} 条新的 CS2 官方新闻。` : '没有发现新的 CS2 官方新闻。'
     })
 
+  ctx.command('cs2log.test', '测试推送最近 2 条 CS2 官方新闻')
+    .action(async () => {
+      const items = await fetchNews()
+      const testItems = items.slice(0, 2).reverse()
+      if (!testItems.length) return '没有拉取到可测试推送的 CS2 官方新闻。'
+
+      for (const item of testItems) {
+        await pushNews(classifyNews(item))
+      }
+
+      return `已触发 ${testItems.length} 条 CS2 官方新闻测试推送。本次测试不会写入 gid 判重 state。`
+    })
+
   ctx.on('ready', () => {
     void loadState()
       .then(() => pollAndPush('startup'))
