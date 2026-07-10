@@ -50,8 +50,8 @@
   },
   "koishi": {
     "description": {
-      "zh": "监控 CS2 官方 Steam 公告和更新日志，并推送到指定 QQ 群。",
-      "en": "Monitor official CS2 Steam announcements and update logs."
+      "zh": "✨监控CS2更新日志和官方公告，并自动推送到指定QQ群⭐",
+      "en": "Monitor official CS2 announcements and update logs."
     },
     "service": {
       "required": [
