@@ -13,9 +13,13 @@ export const inject = {
 }
 
 const APP_ID = 730
-const STEAM_RSS_URL = `https://store.steampowered.com/feeds/news/app/${APP_ID}/`
+const STEAM_FASTLY_RSS_URL = `https://store.fastly.steamstatic.com/feeds/news/app/${APP_ID}/`
+const STEAM_STORE_RSS_URL = `https://store.steampowered.com/feeds/news/app/${APP_ID}/`
+const STEAM_NEWS_API_URL = 'https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/'
 const STATE_LIMIT = 1000
-const RSS_LIST_CACHE_TTL_MS = 15 * 1000
+const RSS_LIST_CACHE_TTL_MS = 3 * 1000
+const RSS_CACHE_BUCKET_MS = 30 * 1000
+const STEAM_REQUEST_TIMEOUT_MS = 8 * 1000
 const RUNTIME_CACHE_CLEAR_INTERVAL_MS = 5 * 60 * 1000
 const TRANSLATE_TIMEOUT_MS = 90 * 1000
 const ASSET_DIR = path.resolve(__dirname, '..', 'assets')
@@ -49,6 +53,21 @@ interface RssItem {
   link?: XmlText
   guid?: XmlText
   pubDate?: XmlText
+}
+
+interface SteamNewsApiResponse {
+  appnews?: {
+    newsitems?: SteamNewsApiItem[]
+  }
+}
+
+interface SteamNewsApiItem {
+  gid?: string | number
+  title?: string
+  url?: string
+  author?: string
+  contents?: string
+  date?: number
 }
 
 type XmlText = string | number | {
@@ -110,7 +129,7 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  interval: Schema.number().min(5).step(1).default(30).description('轮询间隔，单位：秒。'),
+  interval: Schema.number().min(5).step(1).default(15).description('轮询间隔，单位：秒。'),
   count: Schema.number().min(1).max(100).step(1).default(20).description('每次从 Steam 拉取的新闻数量。'),
   stateFile: Schema.string().default('.koishi-cs2-update-log.json').description('本地 gid 判重文件路径。相对路径会基于 Koishi 启动目录解析。'),
   pushOnFirstRun: Schema.boolean().default(false).description('首次启动时是否推送历史内容。默认关闭，避免刷屏。'),
@@ -219,24 +238,23 @@ export function apply(ctx: Context, config: Config) {
         return cache.rssItems.slice(0, config.count)
       }
 
-      const xml = await ctx.http.get<string>(STEAM_RSS_URL, {
-        headers: {
-          Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
-          'User-Agent': 'koishi-plugin-cs2-update-log/2.1',
-        },
-        responseType: 'text',
-        timeout: 30000,
-      })
+      const cacheBucket = Math.floor(Date.now() / RSS_CACHE_BUCKET_MS)
+      const fastlyUrl = `${STEAM_FASTLY_RSS_URL}?l=english&_=${cacheBucket}`
+      const apiUrl = `${STEAM_NEWS_API_URL}?appid=${APP_ID}&count=${config.count}&maxlength=0&format=json`
 
-      const parsed = rssParser.parse(xml) as RssFeed
-      const rawItems = parsed.rss?.channel?.item
-      const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : []
+      let items: SteamNewsItem[]
+      try {
+        items = await Promise.any([
+          fetchRssSource('Fastly RSS', fastlyUrl),
+          fetchApiSource('Steam Web API', apiUrl),
+        ])
+      } catch (primaryError) {
+        const storeUrl = `${STEAM_STORE_RSS_URL}?l=english&_=${cacheBucket}`
+        logger.warn('Fastly RSS 与 Steam Web API 均不可用，回退到 Store RSS：%s', formatAggregateError(primaryError))
+        items = await fetchRssSource('Store RSS', storeUrl)
+      }
 
-      const parsedItems = items
-        .map(parseRssItem)
-        .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
-
-      const cachedItems = parsedItems.map((item) => {
+      const cachedItems = items.map((item) => {
         const cached = cache.newsByGid.get(item.gid)
         if (cached && cached.title === item.title && cached.content === item.content && cached.url === item.url && cached.date === item.date) {
           return cached
@@ -250,8 +268,60 @@ export function apply(ctx: Context, config: Config) {
 
       return cachedItems.slice(0, config.count)
     } catch (error) {
-      logger.error('拉取 Steam CS2 RSS 失败：url=%s\n%s', STEAM_RSS_URL, formatError(error))
+      logger.error('拉取 Steam CS2 官方新闻失败：\n%s', formatError(error))
       return []
+    }
+  }
+
+  async function fetchRssSource(source: string, url: string): Promise<SteamNewsItem[]> {
+    const startedAt = Date.now()
+    try {
+      const xml = await ctx.http.get<string>(url, {
+        headers: {
+          Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+          'User-Agent': 'koishi-plugin-cs2-update-log/2.2',
+        },
+        responseType: 'text',
+        timeout: STEAM_REQUEST_TIMEOUT_MS,
+      })
+
+      const parsed = rssParser.parse(xml) as RssFeed
+      const rawItems = parsed.rss?.channel?.item
+      const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : []
+
+      const parsedItems = items
+        .map(parseRssItem)
+        .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
+
+      if (!parsedItems.length) throw new Error('返回内容中没有有效新闻')
+      logger.debug('%s 拉取成功：items=%d duration=%dms', source, parsedItems.length, Date.now() - startedAt)
+      return parsedItems
+    } catch (error) {
+      logger.debug('%s 拉取失败：duration=%dms url=%s\n%s', source, Date.now() - startedAt, url, formatError(error))
+      throw new Error(`${source} 拉取失败：${formatError(error)}`)
+    }
+  }
+
+  async function fetchApiSource(source: string, url: string): Promise<SteamNewsItem[]> {
+    const startedAt = Date.now()
+    try {
+      const response = await ctx.http.get<SteamNewsApiResponse>(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'koishi-plugin-cs2-update-log/2.2',
+        },
+        timeout: STEAM_REQUEST_TIMEOUT_MS,
+      })
+      const parsedItems = (response.appnews?.newsitems || [])
+        .map(parseSteamApiItem)
+        .filter((item): item is SteamNewsItem => !!item?.gid && !!item.title)
+
+      if (!parsedItems.length) throw new Error('返回内容中没有有效新闻')
+      logger.debug('%s 拉取成功：items=%d duration=%dms', source, parsedItems.length, Date.now() - startedAt)
+      return parsedItems
+    } catch (error) {
+      logger.debug('%s 拉取失败：duration=%dms url=%s\n%s', source, Date.now() - startedAt, url, formatError(error))
+      throw new Error(`${source} 拉取失败：${formatError(error)}`)
     }
   }
 
@@ -309,25 +379,24 @@ export function apply(ctx: Context, config: Config) {
   }
 
   async function pushNews(news: ClassifiedNews) {
-    const content = await buildNewsContent(news)
-
     if (!config.targets.length) {
       logger.warn('未配置推送目标，已跳过：%s', news.item.title)
       return
     }
 
-    for (const target of config.targets) {
+    const content = await buildNewsContent(news)
+    await Promise.all(config.targets.map(async (target) => {
       try {
         const bot = findTargetBot(ctx, target)
         if (!bot) {
           logger.warn('找不到推送机器人 platform=%s selfId=%s', target.platform, target.selfId || '*')
-          continue
+          return
         }
         await bot.sendMessage(target.channelId, content)
       } catch (error) {
         logger.error('推送到 channelId=%s 失败：%s', target.channelId, formatError(error))
       }
-    }
+    }))
   }
 
   async function renderOrFallbackText(news: ClassifiedNews, title: string, bodyMarkdown: string, link: string) {
@@ -370,7 +439,7 @@ export function apply(ctx: Context, config: Config) {
       }
 
       await page.setContent(html, {
-        waitUntil: 'networkidle0',
+        waitUntil: 'load',
       })
 
       const card = await page.$('#card')
@@ -563,6 +632,21 @@ function parseRssItem(item: RssItem): SteamNewsItem | null {
     author: 'Valve',
     content: readXmlText(item.description),
     date: Number.isFinite(dateValue) ? Math.floor(dateValue / 1000) : 0,
+  }
+}
+
+function parseSteamApiItem(item: SteamNewsApiItem): SteamNewsItem | null {
+  const gid = String(item.gid || '').trim()
+  const title = decodeHtmlEntities(String(item.title || '').trim())
+  if (!gid || !title) return null
+
+  return {
+    gid,
+    title,
+    url: String(item.url || '').trim(),
+    author: String(item.author || 'Valve').trim(),
+    content: String(item.contents || ''),
+    date: Number.isFinite(item.date) ? Number(item.date) : 0,
   }
 }
 
@@ -890,13 +974,13 @@ body {
   font-size: 14px;
 }
 .qr-code {
-  width: 62px;
-  height: 62px;
+  display: block;
+  width: 64px;
+  height: 64px;
   flex: 0 0 auto;
-  padding: 5px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 5px;
+  background: #ffffff;
+  object-fit: cover;
 }
 </style>
 </head>
@@ -1042,6 +1126,13 @@ function formatError(error: unknown) {
   const lines: string[] = []
   appendErrorDetails(lines, error)
   return lines.join('\n')
+}
+
+function formatAggregateError(error: unknown) {
+  if (error instanceof AggregateError) {
+    return error.errors.map((item) => formatError(item)).join(' | ')
+  }
+  return formatError(error)
 }
 
 function appendErrorDetails(lines: string[], error: unknown, label = 'error', depth = 0, seen = new Set<unknown>()) {

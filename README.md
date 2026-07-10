@@ -6,15 +6,16 @@ Koishi QQ 机器人插件，用于轮询 CS2 官方 Steam 公告流，按 `gid` 
 
 ## 功能
 
-- 使用 Steam Store RSS `https://store.steampowered.com/feeds/news/app/730/` 拉取 AppID `730` 的官方公告流。
-- 默认每 30 秒轮询一次。
+- 使用 Valve Fastly RSS、Steam Web API 与 Store RSS 拉取 AppID `730` 的官方公告流。
+- 默认每 15 秒轮询一次。
 - 首次启动默认只记录历史 `gid`，不推送历史内容。
 - 自动分类：
   - 标题包含 `Counter-Strike 2 Update` / `Release Notes`
   - 或正文包含 `[MAPS]`、`[GAMEPLAY]`、`[MISC]`、`[AUDIO]`、`[ITEMS]`、`[WORKSHOP]`、`[PREMIER]` 等更新分区
 - 支持纯文本推送或 Puppeteer 深色长图卡片推送。
 - 支持 OpenAI-compatible Chat Completions API 翻译。
-- 内置短时运行时缓存：RSS 列表缓存 15 秒，新闻内容、AI 翻译结果、长图 PNG 和卡片静态资源每 5 分钟清理一次，减少连续测试/重复推送的开销。
+- 优先并发请求 Valve Fastly RSS 与 Steam Web API，并在两者都不可用时回退到 Store RSS；Fastly RSS 使用 30 秒缓存时间桶，兼顾新公告发现速度和源站压力。
+- 内置短时运行时缓存：RSS 列表缓存 3 秒，新闻内容、AI 翻译结果、长图 PNG 和卡片静态资源每 5 分钟清理一次，减少连续测试/重复推送的开销。
 - 提供 `cs2log.check`、`cs2log.push` 与 `cs2log.test` 命令。
 
 ## 配置要点
