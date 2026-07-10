@@ -1,4 +1,4 @@
-import { Context, h, Schema } from 'koishi'
+import { Context, h, Schema, Universal } from 'koishi'
 import MarkdownIt from 'markdown-it'
 import { XMLParser } from 'fast-xml-parser'
 import { createHash } from 'node:crypto'
@@ -182,6 +182,9 @@ export function apply(ctx: Context, config: Config) {
   }
   let stateInitialized = false
   let polling = false
+  let appReady = false
+  let stateLoadPromise: Promise<void> | undefined
+  let initialPollStarted = false
 
   function clearRuntimeCache(reason: string) {
     cache.rssFetchedAt = 0
@@ -209,7 +212,9 @@ export function apply(ctx: Context, config: Config) {
 
   async function saveState(recentItems: SteamNewsItem[]) {
     try {
-      const recentGids = recentItems.map((item) => item.gid).filter(Boolean)
+      const recentGids = recentItems
+        .map((item) => item.gid)
+        .filter((gid) => gid && knownGids.has(gid))
       const recentSet = new Set(recentGids)
       const gids = [
         ...recentGids,
@@ -325,7 +330,7 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  async function pollAndPush(source: 'startup' | 'timer' | 'manual'): Promise<number> {
+  async function pollAndPush(source: 'startup' | 'timer' | 'manual' | 'online'): Promise<number> {
     if (polling) {
       logger.debug('已有轮询任务正在执行，跳过本次 %s。', source)
       return 0
@@ -351,7 +356,11 @@ export function apply(ctx: Context, config: Config) {
       let pushed = 0
       for (const item of freshItems) {
         const classified = classifyNews(item)
-        await pushNews(classified)
+        const delivered = await pushNews(classified)
+        if (!delivered) {
+          logger.warn('新闻未成功送达，保留 gid 等待重试：gid=%s title=%s', item.gid, item.title)
+          continue
+        }
         knownGids.add(item.gid)
         pushed += 1
       }
@@ -378,25 +387,62 @@ export function apply(ctx: Context, config: Config) {
       : buildTextMessage(news, displayTitle, displayMarkdown, link)
   }
 
-  async function pushNews(news: ClassifiedNews) {
+  async function pushNews(news: ClassifiedNews): Promise<boolean> {
     if (!config.targets.length) {
       logger.warn('未配置推送目标，已跳过：%s', news.item.title)
-      return
+      return false
+    }
+
+    const deliveries = config.targets.map((target) => ({
+      target,
+      bot: findTargetBot(ctx, target),
+    }))
+    const unavailable = deliveries.filter(({ bot }) => !bot)
+    if (unavailable.length) {
+      for (const { target } of unavailable) {
+        logger.warn('找不到在线推送机器人 platform=%s selfId=%s', target.platform, target.selfId || '*')
+      }
+      return false
     }
 
     const content = await buildNewsContent(news)
-    await Promise.all(config.targets.map(async (target) => {
+    const results = await Promise.all(deliveries.map(async ({ target, bot }) => {
       try {
-        const bot = findTargetBot(ctx, target)
-        if (!bot) {
-          logger.warn('找不到推送机器人 platform=%s selfId=%s', target.platform, target.selfId || '*')
-          return
-        }
+        if (!bot) return false
         await bot.sendMessage(target.channelId, content)
+        return true
       } catch (error) {
         logger.error('推送到 channelId=%s 失败：%s', target.channelId, formatError(error))
+        return false
       }
     }))
+    return results.every(Boolean)
+  }
+
+  function ensureStateLoaded() {
+    return stateLoadPromise ||= loadState()
+  }
+
+  function allTargetBotsOnline() {
+    return !!config.targets.length && config.targets.every((target) => !!findTargetBot(ctx, target))
+  }
+
+  async function pollWhenTargetsOnline(source: 'startup' | 'timer' | 'manual' | 'online') {
+    if (!appReady) {
+      logger.debug('应用尚未 ready，跳过本次 %s 轮询。', source)
+      return 0
+    }
+    await ensureStateLoaded()
+    if (!allTargetBotsOnline()) {
+      logger.debug('目标机器人尚未全部在线，跳过本次 %s 轮询。', source)
+      return 0
+    }
+
+    if (!initialPollStarted) {
+      initialPollStarted = true
+      return pollAndPush('startup')
+    }
+    return pollAndPush(source)
   }
 
   async function renderOrFallbackText(news: ClassifiedNews, title: string, bodyMarkdown: string, link: string) {
@@ -564,7 +610,8 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.command('cs2log.push', '手动检查并推送新的 CS2 官方公告')
     .action(async () => {
-      const pushed = await pollAndPush('manual')
+      if (!allTargetBotsOnline()) return '目标机器人尚未在线，暂未执行推送。'
+      const pushed = await pollWhenTargetsOnline('manual')
       return pushed ? `已推送 ${pushed} 条新的 CS2 官方新闻。` : '没有发现新的 CS2 官方新闻。'
     })
 
@@ -584,16 +631,33 @@ export function apply(ctx: Context, config: Config) {
       return `已向当前会话触发 ${testItems.length} 条 CS2 官方新闻测试推送。本次测试不会写入 gid 判重 state。`
     })
 
-  ctx.on('ready', () => {
-    void loadState()
-      .then(() => pollAndPush('startup'))
-      .catch((error) => {
-        logger.error('启动 CS2 新闻轮询失败：%s', formatError(error))
-      })
+  ctx.on('ready', async () => {
+    appReady = true
+    try {
+      await pollWhenTargetsOnline('startup')
+    } catch (error) {
+      logger.error('启动 CS2 新闻轮询失败：%s', formatError(error))
+    }
+  })
+
+  ctx.on('bot-status-updated', async (bot) => {
+    if (bot.status !== Universal.Status.ONLINE) return
+    const matchesTarget = config.targets.some((target) => {
+      if (target.platform && bot.platform !== target.platform) return false
+      if (target.selfId && bot.selfId !== target.selfId) return false
+      return true
+    })
+    if (!matchesTarget) return
+
+    try {
+      await pollWhenTargetsOnline('online')
+    } catch (error) {
+      logger.error('机器人上线后检查 CS2 新闻失败：%s', formatError(error))
+    }
   })
 
   ctx.setInterval(() => {
-    void pollAndPush('timer')
+    void pollWhenTargetsOnline('timer')
   }, Math.max(5, config.interval) * 1000)
 
   ctx.setInterval(() => {
@@ -1025,6 +1089,7 @@ body {
 function findTargetBot(ctx: Context, target: TargetConfig) {
   const bots = Array.from(ctx.bots || [])
   return bots.find((bot) => {
+    if (bot.status !== Universal.Status.ONLINE) return false
     if (target.platform && bot.platform !== target.platform) return false
     if (target.selfId && bot.selfId !== target.selfId) return false
     return true
