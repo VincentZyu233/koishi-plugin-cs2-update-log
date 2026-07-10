@@ -129,8 +129,8 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  interval: Schema.number().min(5).step(1).default(15).description('轮询间隔，单位：秒。'),
-  count: Schema.number().min(1).max(100).step(1).default(20).description('每次从 Steam 拉取的新闻数量。'),
+  interval: Schema.number().min(5).step(1).default(30).description('轮询间隔，单位：秒。'),
+  count: Schema.number().min(1).max(100).step(1).default(5).description('每次从 Steam 拉取的新闻数量。'),
   stateFile: Schema.string().default('.koishi-cs2-update-log.json').description('本地 gid 判重文件路径。相对路径会基于 Koishi 启动目录解析。'),
   pushOnFirstRun: Schema.boolean().default(false).description('首次启动时是否推送历史内容。默认关闭，避免刷屏。'),
   targets: Schema.array(Schema.object({
