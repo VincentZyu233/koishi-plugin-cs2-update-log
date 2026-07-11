@@ -2,7 +2,8 @@
 
 [![Github](https://img.shields.io/badge/-Github-000?style=flat&logo=Github&logoColor=white)](https://github.com/BestBcz/koishi-cs2-update-log)
 [![npm](https://img.shields.io/npm/v/koishi-plugin-cs2-update-log?style=flat&color=DB4527)](https://www.npmjs.com/package/koishi-plugin-cs2-update-log)
-
+[![KoishiForum](https://img.shields.io/badge/Forum-Koishi?style=flat-square&label=Koishi&color=8029F2
+)](https://forum.koishi.xyz/t/topic/12652)
 
 [Koishi QQ 机器人](https://koishi.chat/) 插件，用于轮询 CS2 官方公告流，按 `gid` 判重后将官方更新日志或官方公告推送到指定群。
 
