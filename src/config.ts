@@ -42,7 +42,7 @@ export interface Config {
   enableLlmSummary: boolean // 🧠 是否启用手动 LLM 摘要命令
   llmApiFormat: LlmApiFormat // 🔌 LLM API 请求格式
   llmApiKey: string // 🔑 LLM API Key
-  llmApiEndpoint: string // 🌐 LLM API 接口地址
+  llmApiEndpoint: string // 🌐 LLM API 基础地址或完整端点
   llmModel: string // 🧠 LLM 模型名
   llmMaxTokens: number // 📏 LLM 最大输出 Token 数
   llmTranslatePrompt: string // 📝 翻译系统提示词
@@ -166,14 +166,14 @@ export const Config: Schema<Config> = Schema.intersect([
     ])
       .role('radio')
       .default('openai')
-      .description('🔌 LLM API 请求与响应格式<br><i>切换格式后，请同步填写对应服务商的完整接口地址。</i>'),
+      .description('🔌 LLM API 请求与响应格式<br><i>Anthropic 自动补 /v1/messages，OpenAI 自动补 /v1/chat/completions。</i>'),
     llmApiKey: Schema.string()
       .role('secret')
       .description('🔑 翻译与摘要共用的 LLM API Key<br><i>启用任一 LLM 功能时必填，请妥善保护配置文件。</i>'),
     llmApiEndpoint: Schema.string()
       .role('link')
-      .default('https://api.deepseek.com/chat/completions')
-      .description('🌐 LLM 完整接口地址<br><i>默认使用 DeepSeek OpenAI-compatible 接口；Anthropic 格式通常以 /v1/messages 结尾。</i>'),
+      .default('https://api.deepseek.com')
+      .description('🌐 LLM 基础地址或完整端点<br><i>可直接填写服务根地址；已有 /v1/messages 或 /v1/chat/completions 等完整路径时保持原样。</i>'),
     llmModel: Schema.string()
       .default('deepseek-v4-flash')
       .description('🧠 翻译与摘要共用的模型名<br><i>默认使用 DeepSeek-V4-Flash。</i>'),
@@ -182,7 +182,7 @@ export const Config: Schema<Config> = Schema.intersect([
       .max(102400)
       .step(1)
       .default(10240)
-      .description('📏 单次 LLM 请求允许生成的最大 Token 数<br><i>范围：256～32768；摘要内容较多时需要适当提高。</i>'),
+      .description('📏 单次 LLM 请求允许生成的最大 Token 数<br><i>范围：32～102400；摘要内容较多或模型启用思考时需要适当提高。</i>'),
     llmTranslatePrompt: Schema.string()
       .role('textarea')
       .default('你是一个专业的游戏公告翻译助手。请将 CS2 Steam 官方公告翻译为简体中文，保留 Markdown 结构、更新分区、列表、粗体、行内代码和代码块，不要添加原文没有的解释。')

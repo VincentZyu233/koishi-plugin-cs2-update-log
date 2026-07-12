@@ -255,9 +255,9 @@ export class LlmClient {
       },
       timeout: LLM_TIMEOUT_MS,
     }
-    let response: OpenAiResponse
+    let response: OpenAiResponse | string
     try {
-      response = await this.ctx.http.post<OpenAiResponse>(endpoint, {
+      response = await this.ctx.http.post<OpenAiResponse | string>(endpoint, {
         model: this.config.llmModel,
         messages,
         max_tokens: this.config.llmMaxTokens,
@@ -266,15 +266,18 @@ export class LlmClient {
     } catch (error) {
       if (!shouldRetryWithMaxCompletionTokens(error)) throw error
       this.logger.debug('LLM 接口不支持 max_tokens，改用 max_completion_tokens 重试。')
-      response = await this.ctx.http.post<OpenAiResponse>(endpoint, {
+      response = await this.ctx.http.post<OpenAiResponse | string>(endpoint, {
         model: this.config.llmModel,
         messages,
         max_completion_tokens: this.config.llmMaxTokens,
       }, options)
     }
 
+    if (typeof response === 'string') throw unexpectedTextResponse('OpenAI-compatible', response)
     const choice = response?.choices?.[0]
-    if (choice?.finish_reason === 'length') throw new Error('OpenAI-compatible response was truncated')
+    if (choice?.finish_reason === 'length') {
+      throw new Error(`OpenAI-compatible response was truncated at llmMaxTokens=${this.config.llmMaxTokens}`)
+    }
     const content = readOpenAiContent(choice?.message?.content)
     if (!content) throw new Error('empty OpenAI-compatible response')
     return content
@@ -291,7 +294,7 @@ export class LlmClient {
       .map((message) => message.content)
       .join('\n\n')
 
-    const response = await this.ctx.http.post<AnthropicResponse>(
+    const response = await this.ctx.http.post<AnthropicResponse | string>(
       endpoint,
       {
         model: this.config.llmModel,
@@ -310,8 +313,12 @@ export class LlmClient {
       },
     )
 
+    if (typeof response === 'string') throw unexpectedTextResponse('Anthropic', response)
     if (response?.stop_reason === 'max_tokens' || response?.stop_reason === 'length') {
-      throw new Error(`Anthropic response was truncated (stop_reason=${response.stop_reason})`)
+      throw new Error(
+        `Anthropic response was truncated at llmMaxTokens=${this.config.llmMaxTokens} `
+        + `(stop_reason=${response.stop_reason})`,
+      )
     }
     const content = (response?.content || [])
       .filter((block) => block?.type === 'text' && typeof block.text === 'string')
@@ -341,13 +348,40 @@ export class LlmClient {
   }
 }
 
-function appendEndpoint(baseUrl: string, endpoint: string): string {
-  const base = String(baseUrl || '').trim().replace(/\/+$/, '')
-  // Avoid duplicating /v1 when base already ends with /v1 and endpoint starts with /v1/
-  if (base.endsWith('/v1') && endpoint.startsWith('/v1/')) {
-    return base + endpoint.slice(3)
+export function appendEndpoint(baseUrl: string, endpoint: string): string {
+  const base = String(baseUrl || '').trim()
+  if (!base) return ''
+
+  try {
+    const url = new URL(base)
+    const pathname = url.pathname.replace(/\/+$/, '')
+    if (isCompleteEndpoint(pathname, endpoint)) return base.replace(/\/+$/, '')
+
+    const suffix = pathname.endsWith('/v1') && endpoint.startsWith('/v1/')
+      ? endpoint.slice(3)
+      : endpoint
+    url.pathname = `${pathname}${suffix}`
+    return url.toString()
+  } catch {
+    const normalized = base.replace(/\/+$/, '')
+    if (isCompleteEndpoint(normalized, endpoint)) return normalized
+    if (normalized.endsWith('/v1') && endpoint.startsWith('/v1/')) {
+      return normalized + endpoint.slice(3)
+    }
+    return normalized + endpoint
   }
-  return base.endsWith(endpoint) ? base : base + endpoint
+}
+
+function isCompleteEndpoint(pathname: string, endpoint: string) {
+  if (pathname.endsWith(endpoint)) return true
+  if (endpoint.endsWith('/chat/completions')) return pathname.endsWith('/chat/completions')
+  if (endpoint.endsWith('/messages')) return pathname.endsWith('/messages')
+  return false
+}
+
+function unexpectedTextResponse(protocol: string, response: string) {
+  const responseType = /^\s*</.test(response) ? 'HTML' : 'plain text'
+  return new Error(`${protocol} endpoint returned ${responseType} instead of JSON; check llmApiEndpoint and llmApiFormat`)
 }
 
 function buildSummaryInput(items: LlmSummaryInput[]) {

@@ -97,11 +97,11 @@ export const usage: string = `
   <li><code>enableLlmSummary</code> 只控制手动 <code>cs2log.ai</code> 与 <code>--broadcast</code>。</li>
   <li><code>llmApiFormat</code> 支持 <code>openai</code> Chat Completions 和 <code>anthropic</code> Messages API。</li>
   <li><code>llmApiKey</code>、<code>llmApiEndpoint</code>、<code>llmModel</code> 由翻译和摘要共用。</li>
-  <li><code>llmMaxTokens</code> 默认 4096；服务商限制更小时请相应调低。</li>
+  <li><code>llmMaxTokens</code> 默认 10240；摘要内容较多或模型启用思考时可适当提高。</li>
   <li><code>llmTranslatePrompt</code> 约束逐篇翻译，<code>llmSummaryPrompt</code> 决定合并摘要的内容、格式与输出语言。</li>
 </ul>
 
-<p>默认使用 DeepSeek 的 OpenAI-compatible 接口 <code>https://api.deepseek.com/chat/completions</code> 与模型 <code>deepseek-v4-flash</code>。OpenAI 格式默认使用兼容服务常见的 <code>max_tokens</code>，接口明确拒绝时会自动改用 <code>max_completion_tokens</code> 重试一次。使用 Anthropic 格式时，请将接口改为服务商提供的 Messages API 完整地址，例如 <code>https://api.anthropic.com/v1/messages</code>，并填写对应模型。LLM 请求失败时，普通新闻翻译会回退原文；AI 摘要命令则返回明确错误，不会写入 state。</p>
+<p>默认使用 DeepSeek 基础地址 <code>https://api.deepseek.com</code> 与模型 <code>deepseek-v4-flash</code>。配置可以只填写服务根地址：Anthropic 自动补 <code>/v1/messages</code>，OpenAI 自动补 <code>/v1/chat/completions</code>；已有完整端点时保持原样。OpenAI 格式默认使用兼容服务常见的 <code>max_tokens</code>，接口明确拒绝时会自动改用 <code>max_completion_tokens</code> 重试一次。LLM 请求失败时，普通新闻翻译会回退原文；AI 摘要命令则返回明确错误，不会写入 state。</p>
 
 <h3>⌨️ 命令权限</h3>
 <ul>

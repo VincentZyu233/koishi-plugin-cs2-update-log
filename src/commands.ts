@@ -1,4 +1,5 @@
 import { Context, h, Session } from 'koishi'
+import type { Fragment } from 'koishi'
 
 import { Config } from './config'
 import { Cs2UpdateLogRuntime } from './runtime'
@@ -7,6 +8,12 @@ import { formatDate } from './utils/date'
 
 function buildPrefix(config: Config, session: Session): string {
   return config.enableQuote ? `${h.quote(session.messageId)}` : ''
+}
+
+function prependQuote(config: Config, session: Session, content: Fragment): Fragment {
+  if (!config.enableQuote) return content
+  const quote = h.quote(session.messageId)
+  return Array.isArray(content) ? [quote, ...content] : [quote, content]
 }
 
 async function sendHint(config: Config, session: Session, prefix: string, text: string): Promise<string | null> {
@@ -93,7 +100,10 @@ export function registerCommands(ctx: Context, config: Config, runtime: Cs2Updat
         const notices = new Set<string>()
         for (const item of testItems) {
           const rendered = await runtime.buildNewsMessage(classifyNews(item))
-          await session.bot.sendMessage(session.channelId, rendered.content)
+          await session.bot.sendMessage(
+            session.channelId,
+            prependQuote(config, session, rendered.content),
+          )
           if (rendered.notice) notices.add(rendered.notice)
         }
 
