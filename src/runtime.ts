@@ -81,6 +81,7 @@ export class Cs2UpdateLogRuntime {
     this.ctx.on('bot-status-updated', async (bot) => {
       if (bot.status !== Universal.Status.ONLINE) return
       const matchesTarget = this.config.targets.some((target) => {
+        if (target.enabled === false) return false
         if (target.platform && bot.platform !== target.platform) return false
         if (target.selfId && bot.selfId !== target.selfId) return false
         return true

@@ -8,6 +8,7 @@ export interface TargetConfig {
   platform: string // 🤖 目标机器人平台
   selfId?: string // 🪪 可选机器人账号 ID
   channelId: string // 📨 目标频道 ID 或 QQ 群号
+  enabled?: boolean // ✅ 是否启用此目标
 }
 
 export interface Config {
@@ -95,10 +96,13 @@ export const Config: Schema<Config> = Schema.intersect([
           .default('onebot')
           .description('🤖 目标机器人平台，例如 onebot'),
         selfId: Schema.string()
-          .description('🪪 机器人账号 ID<br><i>留空时使用该平台第一个可用机器人。</i>'),
+          .description('🪪 机器人账号 ID (留空时使用该平台第一个可用机器人)'),
         channelId: Schema.string()
           .required()
           .description('📨 目标频道 ID 或 QQ 群号'),
+        enabled: Schema.boolean()
+          .default(true)
+          .description('✅ 是否启用此推送目标<br><i>关闭后该目标不出现在自动/手动推送与 AI 广播中。</i>'),
       }),
     )
       .role('table')

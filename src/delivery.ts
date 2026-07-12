@@ -35,12 +35,12 @@ export class DeliveryManager {
   ) {}
 
   getConfiguredStateKeys() {
-    return new Set(this.config.targets.map(getTargetStateKey))
+    return new Set(this.enabledTargets().map(getTargetStateKey))
   }
 
   resolveConfiguredTargets() {
     return mergeDuplicateTargets(
-      this.config.targets.map((target) => this.resolveConfiguredTarget(target)),
+      this.enabledTargets().map((target) => this.resolveConfiguredTarget(target)),
     )
   }
 
@@ -105,6 +105,10 @@ export class DeliveryManager {
     }))
 
     return createReport([...unavailableResults, ...sendResults], false)
+  }
+
+  private enabledTargets() {
+    return this.config.targets.filter((t) => t.enabled !== false)
   }
 
   private resolveConfiguredTarget(target: TargetConfig): DeliveryTarget {
