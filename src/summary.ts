@@ -49,7 +49,7 @@ export class SummaryRenderer {
   }
 
   async renderOrFallbackText(summaryMarkdown: string, sources: SummarySource[]): Promise<RenderResult> {
-    const fallbackText = buildTextMessage(summaryMarkdown, sources)
+    const fallbackText = buildTextMessage(summaryMarkdown, sources, this.config.showAiSummaryTextSources)
     if (!this.config.picture) return { content: fallbackText }
 
     const puppeteer = (this.ctx as Context & { puppeteer?: PuppeteerService }).puppeteer
@@ -78,7 +78,7 @@ export class SummaryRenderer {
       }
 
       const image = h.image(png, 'image/png')
-      const sourceList = buildSourceList(sources)
+      const sourceList = this.config.showAiSummaryTextSources ? buildSourceList(sources) : ''
       return { content: this.config.appendLink && sourceList ? [image, '\n', sourceList] : image, notice: fontFallback ? FONT_NOTICE : undefined }
     } catch (error) {
       this.logger.error('生成 AI 摘要长图失败，将降级为纯文本：%s', formatError(error))
@@ -88,7 +88,7 @@ export class SummaryRenderer {
 
   private async renderCard(puppeteer: PuppeteerService, summaryMarkdown: string, sources: SummarySource[], fontBase64: string): Promise<Buffer> {
     const assets = await this.loadCardAssets()
-    const html = buildCardHtml(summaryMarkdown, sources, this.config, assets, fontBase64)
+    const html = buildCardHtml(summaryMarkdown, sources, this.config, assets, fontBase64, this.config.showAiSummaryCardSources)
     const page = await puppeteer.page()
 
     try {
@@ -141,9 +141,9 @@ export class SummaryRenderer {
   }
 }
 
-function buildTextMessage(summaryMarkdown: string, sources: SummarySource[]) {
+function buildTextMessage(summaryMarkdown: string, sources: SummarySource[], showTextSources: boolean) {
   const summary = summaryMarkdown.trim()
-  const sourceList = buildSourceList(sources)
+  const sourceList = showTextSources ? buildSourceList(sources) : ''
   return [summary, sourceList].filter(Boolean).join('\n\n---\n\n')
 }
 
@@ -159,11 +159,11 @@ function buildSourceList(sources: SummarySource[]) {
   return ['## SOURCES', ...items].join('\n')
 }
 
-function buildCardHtml(summaryMarkdown: string, sources: SummarySource[], config: Config, assets: CardAssets, fontBase64: string): string {
+function buildCardHtml(summaryMarkdown: string, sources: SummarySource[], config: Config, assets: CardAssets, fontBase64: string, showCardSources: boolean): string {
   const renderedSummary = markdown.render(summaryMarkdown.trim())
   const generatedAt = formatDate(Math.floor(Date.now() / 1000))
   const fontFace = fontBase64 ? `@font-face { font-family: "${LXGW_WENKAI_FAMILY}"; src: url(data:font/truetype;charset=utf-8;base64,${fontBase64}) format("truetype"); font-display: block; }` : ''
-  const renderedSources = sources.map((source, index) => `
+  const renderedSources = showCardSources ? sources.map((source, index) => `
     <section class="source-item">
       <div class="source-index">${String(index + 1).padStart(2, '0')}</div>
       <div class="source-main">
@@ -171,7 +171,7 @@ function buildCardHtml(summaryMarkdown: string, sources: SummarySource[], config
         <div class="source-date">${escapeHtml(formatDate(source.date))}</div>
         <div class="source-link">${escapeHtml(source.link)}</div>
       </div>
-    </section>`).join('')
+    </section>`).join('') : ''
 
   return `<!doctype html>
 <html lang="en">
@@ -455,7 +455,7 @@ body {
       </div>
       <div class="digest-label">
         <div class="digest-title">AI SUMMARY</div>
-        <div class="digest-subtitle">${sources.length} SOURCES</div>
+        <div class="digest-subtitle">${showCardSources ? `${sources.length} SOURCES` : 'AI GENERATED'}</div>
       </div>
     </header>
     <main>

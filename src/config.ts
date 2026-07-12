@@ -11,6 +11,10 @@ export interface TargetConfig {
 }
 
 export interface Config {
+  // ===== 💬 会话设置 =====
+  enableQuote: boolean // 💬 是否引用触发指令的消息
+  enableWaitingHint: boolean // ⏳ 是否显示等待提示
+
   // ===== ⏱️ 轮询与状态 =====
   interval: number // ⏱️ Steam 新闻轮询间隔
   count: number // 📰 单次拉取新闻数量
@@ -29,6 +33,8 @@ export interface Config {
   picture: boolean // 🖼️ 是否启用 Puppeteer 长图
   fontPath: string // ✍️ LXGW WenKai Mono 字体路径
   appendLink: boolean // 🔗 长图后是否追加原文链接
+  showAiSummaryCardSources: boolean // 📇 AI 摘要卡片内是否展示 SOURCES
+  showAiSummaryTextSources: boolean // 📋 AI 摘要图片后是否追加 SOURCES 文字
 
   // ===== 🤖 LLM 设置 =====
   enableLlmTranslate: boolean // 🌏 是否启用普通新闻 LLM 翻译
@@ -50,6 +56,16 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.intersect([
+  // ===== 💬 会话设置 =====
+  Schema.object({
+    enableQuote: Schema.boolean()
+      .default(true)
+      .description('💬 bot 发送消息时，是否引用触发指令的消息<br><i>仅对通过指令触发的被动消息生效；定时轮询等主动推送不受影响。</i>'),
+    enableWaitingHint: Schema.boolean()
+      .default(true)
+      .description('⏳ 是否在执行指令前发送等待提示<br><i>提示会在指令执行完成后自动撤回；仅对被动指令消息生效。</i>'),
+  }).description('💬 会话设置 ⚙️'),
+
   // ===== ⏱️ 轮询与状态 =====
   Schema.object({
     interval: Schema.number()
@@ -117,6 +133,12 @@ export const Config: Schema<Config> = Schema.intersect([
     appendLink: Schema.boolean()
       .default(true)
       .description('🔗 长图发送成功时，是否追加 Steam 原文链接<br><i>纯文本与渲染降级消息始终包含原文链接。</i>'),
+    showAiSummaryCardSources: Schema.boolean()
+      .default(true)
+      .description('📇 AI 摘要卡片图片内是否展示 SOURCES 来源段落<br><i>关闭后卡片只保留摘要正文，不显示右上角来源计数与底部来源列表。</i>'),
+    showAiSummaryTextSources: Schema.boolean()
+      .default(false)
+      .description('📋 AI 摘要图片发送后是否追加 SOURCES 文字消息<br><i>关闭后只发图片不发来源文字；纯文本降级模式下同样生效。</i>'),
   }).description('🖼️ 图片显示 🎨'),
 
   // ===== 🤖 LLM 设置 =====
@@ -145,10 +167,10 @@ export const Config: Schema<Config> = Schema.intersect([
       .default('deepseek-v4-flash')
       .description('🧠 翻译与摘要共用的模型名<br><i>默认使用 DeepSeek-V4-Flash。</i>'),
     llmMaxTokens: Schema.number()
-      .min(256)
-      .max(10240)
+      .min(32)
+      .max(102400)
       .step(1)
-      .default(4096)
+      .default(10240)
       .description('📏 单次 LLM 请求允许生成的最大 Token 数<br><i>范围：256～32768；摘要内容较多时需要适当提高。</i>'),
     llmTranslatePrompt: Schema.string()
       .role('textarea')
