@@ -106,7 +106,14 @@ export const Config: Schema<Config> = Schema.intersect([
       }),
     )
       .role('table')
-      .default([])
+      .default([
+        {
+          platform: 'onebot',
+          selfId: '3967912008',
+          channelId: '1085190201',
+          enabled: true,
+        },
+      ])
       .description('🎯 正式新闻与 AI 广播的目标列表<br><i>cs2log.ai --broadcast 会将此列表与当前会话合并，并自动去重。</i>'),
     allowPartialAutoPush: Schema.boolean()
       .default(true)

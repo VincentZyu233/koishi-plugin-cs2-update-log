@@ -35,12 +35,12 @@ export class DeliveryManager {
   ) {}
 
   getConfiguredStateKeys() {
-    return new Set(this.enabledTargets().map(getTargetStateKey))
+    return new Set(enabledTargets(this.config).map(getTargetStateKey))
   }
 
   resolveConfiguredTargets() {
     return mergeDuplicateTargets(
-      this.enabledTargets().map((target) => this.resolveConfiguredTarget(target)),
+      enabledTargets(this.config).map((target) => this.resolveConfiguredTarget(target)),
     )
   }
 
@@ -105,10 +105,6 @@ export class DeliveryManager {
     }))
 
     return createReport([...unavailableResults, ...sendResults], false)
-  }
-
-  private enabledTargets() {
-    return this.config.targets.filter((t) => t.enabled !== false)
   }
 
   private resolveConfiguredTarget(target: TargetConfig): DeliveryTarget {
@@ -187,4 +183,8 @@ function createReport(
     successCount: results.filter((item) => item.success).length,
     failureCount: results.filter((item) => !item.success).length,
   }
+}
+
+function enabledTargets(config: Config) {
+  return config.targets.filter((t) => t.enabled !== false)
 }
