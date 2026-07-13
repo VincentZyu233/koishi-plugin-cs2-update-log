@@ -45,6 +45,8 @@ export interface Config {
   llmApiEndpoint: string // 🌐 LLM API 基础地址或完整端点
   llmModel: string // 🧠 LLM 模型名
   llmMaxTokens: number // 📏 LLM 最大输出 Token 数
+  llmTranslateTimeout: number // ⏳ 普通新闻翻译超时秒数
+  llmSummaryTimeout: number // ⌛ AI 摘要超时秒数
   llmTranslatePrompt: string // 📝 翻译系统提示词
   llmSummaryPrompt: string // 📚 合并摘要系统提示词
 
@@ -183,6 +185,18 @@ export const Config: Schema<Config> = Schema.intersect([
       .step(1)
       .default(10240)
       .description('📏 单次 LLM 请求允许生成的最大 Token 数<br><i>范围：32～102400；摘要内容较多或模型启用思考时需要适当提高。</i>'),
+    llmTranslateTimeout: Schema.number()
+      .min(30)
+      .max(3600)
+      .step(30)
+      .default(600)
+      .description('⏳ 普通新闻 LLM 翻译超时，单位：秒<br><i>范围：30～3600；超时后自动使用原文，手动指令会显示回退原因。</i>'),
+    llmSummaryTimeout: Schema.number()
+      .min(30)
+      .max(3600)
+      .step(30)
+      .default(600)
+      .description('⌛ cs2log.ai 摘要请求超时，单位：秒<br><i>范围：30～3600；长摘要或思考模型可能需要更长时间。</i>'),
     llmTranslatePrompt: Schema.string()
       .role('textarea')
       .default('你是一个专业的游戏公告翻译助手。请将 CS2 Steam 官方公告翻译为简体中文，保留 Markdown 结构、更新分区、列表、粗体、行内代码和代码块，不要添加原文没有的解释。')

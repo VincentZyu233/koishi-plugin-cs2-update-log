@@ -89,7 +89,7 @@ export const usage: string = `
 </ul>
 
 <p>✍️ 默认托管字体缺失或校验失败时，插件会依次尝试 <a href="https://gitee.com/vincent-zyu/koishi-plugin-awa-quote-image/releases/download/fonts/LXGWWenKaiMono-Regular.ttf" target="_blank">Gitee</a> 与 <a href="https://github.com/VincentZyuApps/koishi-plugin-awa-quote-image/releases/download/fonts/LXGWWenKaiMono-Regular.ttf" target="_blank">GitHub</a>。下载内容通过文件大小与多重 hash 校验后才会使用，并采用临时文件原子替换。</p>
-<p>自定义 <code>fontPath</code> 会被严格使用，读取失败时不会切回默认 LXGW，而是记录错误并使用系统字体继续出图。只有 Puppeteer 不可用或截图失败时才降级纯文本。字体失败结果会缓存 5 分钟，避免批量新闻重复等待下载超时，之后会自动重试。手动 <code>push/test/ai</code> 会在当前会话提示 fallback，自动轮询只写日志。LXGW WenKai 遵循 SIL Open Font License 1.1。</p>
+<p>自定义 <code>fontPath</code> 会被严格使用，读取失败时不会切回默认 LXGW，而是记录错误并使用系统字体继续出图。只有 Puppeteer 不可用或截图失败时才降级纯文本。字体失败结果会缓存 5 分钟，避免批量新闻重复等待下载超时，之后会自动重试。手动 <code>push/test/ai</code> 会在当前会话提示字体、图片或 LLM 翻译 fallback，自动轮询只写日志。LXGW WenKai 遵循 SIL Open Font License 1.1。</p>
 
 <h3>🤖 LLM 设置与双协议</h3>
 <ul>
@@ -98,10 +98,11 @@ export const usage: string = `
   <li><code>llmApiFormat</code> 支持 <code>openai</code> Chat Completions 和 <code>anthropic</code> Messages API。</li>
   <li><code>llmApiKey</code>、<code>llmApiEndpoint</code>、<code>llmModel</code> 由翻译和摘要共用。</li>
   <li><code>llmMaxTokens</code> 默认 10240；摘要内容较多或模型启用思考时可适当提高。</li>
+  <li><code>llmTranslateTimeout</code> 与 <code>llmSummaryTimeout</code> 分别控制翻译和摘要的单次请求超时，默认均为 600 秒。</li>
   <li><code>llmTranslatePrompt</code> 约束逐篇翻译，<code>llmSummaryPrompt</code> 决定合并摘要的内容、格式与输出语言。</li>
 </ul>
 
-<p>默认使用 DeepSeek 基础地址 <code>https://api.deepseek.com</code> 与模型 <code>deepseek-v4-flash</code>。配置可以只填写服务根地址：Anthropic 自动补 <code>/v1/messages</code>，OpenAI 自动补 <code>/v1/chat/completions</code>；已有完整端点时保持原样。OpenAI 格式默认使用兼容服务常见的 <code>max_tokens</code>，接口明确拒绝时会自动改用 <code>max_completion_tokens</code> 重试一次。LLM 请求失败时，普通新闻翻译会回退原文；AI 摘要命令则返回明确错误，不会写入 state。</p>
+<p>默认使用 DeepSeek 基础地址 <code>https://api.deepseek.com</code> 与模型 <code>deepseek-v4-flash</code>。配置可以只填写服务根地址：Anthropic 自动补 <code>/v1/messages</code>，OpenAI 自动补 <code>/v1/chat/completions</code>；已有完整端点时保持原样。OpenAI 格式默认使用兼容服务常见的 <code>max_tokens</code>，接口明确拒绝时会自动改用 <code>max_completion_tokens</code> 重试一次。翻译配置错误、超时、截断、格式错误或请求失败时均回退原文；手动指令显示原因，自动轮询只写日志。支持 New API 模型后缀时可手动使用 <code>deepseek-v4-pro-none</code> 或 <code>deepseek-v4-flash-none</code> 关闭思考。</p>
 
 <h3>⌨️ 命令权限</h3>
 <ul>

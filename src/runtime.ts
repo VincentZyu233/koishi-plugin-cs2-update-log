@@ -147,12 +147,22 @@ export class Cs2UpdateLogRuntime {
     const baseMarkdown = steamContentToMarkdown(news.item.content)
     const translated = await this.llm.translate(news.item.title, baseMarkdown)
 
-    return this.renderer.renderOrFallbackText(
+    const rendered = await this.renderer.renderOrFallbackText(
       news,
       translated.title,
       translated.markdown,
       link,
     )
+    const translationNotice = translated.notice
+      ? `gid ${news.item.gid}：${translated.notice}`
+      : undefined
+    const notices = [translationNotice, rendered.notice]
+      .filter((notice): notice is string => !!notice)
+
+    return {
+      ...rendered,
+      notice: notices.length ? notices.join(' ') : undefined,
+    }
   }
 
   async buildNewsContent(news: ClassifiedNews) {

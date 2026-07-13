@@ -1,18 +1,38 @@
 import { Context } from 'koishi'
 
 import type { Config } from './config'
+import {
+  AnthropicResponse,
+  classifyLlmError,
+  invalidResponse,
+  isRecord,
+  LlmErrorKind,
+  OpenAiResponse,
+  parseJsonObject,
+  readAnthropicContent,
+  readOpenAiContent,
+  resolveLlmEndpoint,
+  shouldRetryWithMaxCompletionTokens,
+  stripMarkdownFence,
+  truncatedResponse,
+  unexpectedTextResponse,
+} from './transport'
 import { hashCacheKey } from './utils/cache'
 import { formatError } from './utils/error'
 
 const LOGGER_NAME = 'cs2-update-log'
-const LLM_TIMEOUT_MS = 90 * 1000
 const SUMMARY_ITEM_LIMIT = 5
 const SUMMARY_ITEM_MARKDOWN_LIMIT = 8_000
 const SUMMARY_TOTAL_INPUT_LIMIT = 30_000
 
+export type LlmTranslateFallbackReason = 'configuration' | LlmErrorKind
+
 export interface LlmTranslateResult {
   title: string
   markdown: string
+  status: 'translated' | 'disabled' | 'fallback'
+  fallbackReason?: LlmTranslateFallbackReason
+  notice?: string
 }
 
 export interface LlmSummaryInput {
@@ -20,28 +40,6 @@ export interface LlmSummaryInput {
   markdown: string
   publishedAt?: string
   author?: string
-}
-
-interface OpenAiResponse {
-  choices?: Array<{
-    finish_reason?: string | null
-    message?: {
-      content?: string | OpenAiTextBlock[]
-    }
-  }>
-}
-
-interface OpenAiTextBlock {
-  type?: string
-  text?: string
-}
-
-interface AnthropicResponse {
-  stop_reason?: string | null
-  content?: Array<{
-    type?: string
-    text?: string
-  }>
 }
 
 type LlmMessage = {
@@ -79,19 +77,29 @@ export class LlmClient {
 
     const maxTokens = Number(this.config.llmMaxTokens)
     if (!Number.isFinite(maxTokens) || maxTokens < 1) return 'llmMaxTokens 必须是大于 0 的数字'
+    const translateTimeout = Number(this.config.llmTranslateTimeout)
+    if (!Number.isFinite(translateTimeout) || translateTimeout < 1) return 'llmTranslateTimeout 必须是大于 0 的数字'
+    const summaryTimeout = Number(this.config.llmSummaryTimeout)
+    if (!Number.isFinite(summaryTimeout) || summaryTimeout < 1) return 'llmSummaryTimeout 必须是大于 0 的数字'
     if (this.config.llmApiFormat !== 'openai' && this.config.llmApiFormat !== 'anthropic') {
       return `不支持的 llmApiFormat：${String(this.config.llmApiFormat)}`
     }
   }
 
   async translate(title: string, markdown: string): Promise<LlmTranslateResult> {
-    const original = { title, markdown }
+    const original = { title, markdown, status: 'disabled' as const }
     if (!this.config.enableLlmTranslate) return original
 
     const configurationError = this.getConfigurationError()
     if (configurationError) {
-      this.logger.warn('已开启 LLM 翻译但配置不可用，将推送原文：%s', configurationError)
-      return original
+      this.logger.warn('已开启 LLM 翻译但配置不可用，将推送原文：title=%s error=%s', title, configurationError)
+      return createTranslationFallback(
+        title,
+        markdown,
+        'configuration',
+        this.config.llmTranslateTimeout,
+        configurationError,
+      )
     }
 
     const cacheKey = this.createCacheKey(
@@ -115,8 +123,19 @@ export class LlmClient {
         return result
       })
       .catch((error) => {
-        this.logger.error('LLM 翻译失败，将推送原文：%s', this.formatSafeError(error))
-        return original
+        const reason = classifyLlmError(error)
+        this.logger.error(
+          'LLM 翻译失败，将推送原文：title=%s reason=%s error=%s',
+          title,
+          reason,
+          this.formatSafeError(error),
+        )
+        return createTranslationFallback(
+          title,
+          markdown,
+          reason,
+          this.config.llmTranslateTimeout,
+        )
       })
       .finally(() => {
         if (this.pendingTranslations.get(cacheKey) === request) {
@@ -196,22 +215,23 @@ export class LlmClient {
           '</source-markdown>',
         ].join('\n'),
       },
-    ])
+    ], this.config.llmTranslateTimeout * 1000)
 
     const parsed = parseJsonObject(content)
     if (!isRecord(parsed) || typeof parsed.title !== 'string' || typeof parsed.markdown !== 'string') {
-      throw new Error('translation response must be JSON with string title and markdown fields')
+      throw invalidResponse('translation response must be JSON with string title and markdown fields')
     }
 
     const translatedTitle = parsed.title.trim()
     const translatedMarkdown = parsed.markdown.trim()
     if (!translatedTitle || !translatedMarkdown) {
-      throw new Error('translation response contains an empty title or markdown field')
+      throw invalidResponse('translation response contains an empty title or markdown field')
     }
 
     return {
       title: translatedTitle,
       markdown: translatedMarkdown,
+      status: 'translated',
     }
   }
 
@@ -232,28 +252,28 @@ export class LlmClient {
           input,
         ].join('\n'),
       },
-    ])
+    ], this.config.llmSummaryTimeout * 1000)
 
     const summary = stripMarkdownFence(content).trim()
-    if (!summary) throw new Error('empty summary response')
+    if (!summary) throw invalidResponse('empty summary response')
     return summary
   }
 
-  private async request(messages: LlmMessage[]): Promise<string> {
+  private async request(messages: LlmMessage[], timeout: number): Promise<string> {
     if (this.config.llmApiFormat === 'anthropic') {
-      return this.requestAnthropic(messages)
+      return this.requestAnthropic(messages, timeout)
     }
-    return this.requestOpenAi(messages)
+    return this.requestOpenAi(messages, timeout)
   }
 
-  private async requestOpenAi(messages: LlmMessage[]): Promise<string> {
-    const endpoint = appendEndpoint(this.config.llmApiEndpoint, '/v1/chat/completions')
+  private async requestOpenAi(messages: LlmMessage[], timeout: number): Promise<string> {
+    const endpoint = resolveLlmEndpoint(this.config.llmApiEndpoint, 'openai')
     const options = {
       headers: {
         Authorization: `Bearer ${this.config.llmApiKey}`,
         'Content-Type': 'application/json',
       },
-      timeout: LLM_TIMEOUT_MS,
+      timeout,
     }
     let response: OpenAiResponse | string
     try {
@@ -276,15 +296,15 @@ export class LlmClient {
     if (typeof response === 'string') throw unexpectedTextResponse('OpenAI-compatible', response)
     const choice = response?.choices?.[0]
     if (choice?.finish_reason === 'length') {
-      throw new Error(`OpenAI-compatible response was truncated at llmMaxTokens=${this.config.llmMaxTokens}`)
+      throw truncatedResponse('OpenAI-compatible', this.config.llmMaxTokens, 'finish_reason=length')
     }
     const content = readOpenAiContent(choice?.message?.content)
-    if (!content) throw new Error('empty OpenAI-compatible response')
+    if (!content) throw invalidResponse('empty OpenAI-compatible response')
     return content
   }
 
-  private async requestAnthropic(messages: LlmMessage[]): Promise<string> {
-    const endpoint = appendEndpoint(this.config.llmApiEndpoint, '/v1/messages')
+  private async requestAnthropic(messages: LlmMessage[], timeout: number): Promise<string> {
+    const endpoint = resolveLlmEndpoint(this.config.llmApiEndpoint, 'anthropic')
     const system = messages
       .filter((message) => message.role === 'system')
       .map((message) => message.content)
@@ -309,23 +329,16 @@ export class LlmClient {
           'anthropic-version': '2023-06-01',
           'Content-Type': 'application/json',
         },
-        timeout: LLM_TIMEOUT_MS,
+        timeout,
       },
     )
 
     if (typeof response === 'string') throw unexpectedTextResponse('Anthropic', response)
     if (response?.stop_reason === 'max_tokens' || response?.stop_reason === 'length') {
-      throw new Error(
-        `Anthropic response was truncated at llmMaxTokens=${this.config.llmMaxTokens} `
-        + `(stop_reason=${response.stop_reason})`,
-      )
+      throw truncatedResponse('Anthropic', this.config.llmMaxTokens, `stop_reason=${response.stop_reason}`)
     }
-    const content = (response?.content || [])
-      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-      .map((block) => block.text)
-      .join('\n')
-      .trim()
-    if (!content) throw new Error('empty Anthropic response')
+    const content = readAnthropicContent(response)
+    if (!content) throw invalidResponse('empty Anthropic response')
     return content
   }
 
@@ -348,40 +361,44 @@ export class LlmClient {
   }
 }
 
-export function appendEndpoint(baseUrl: string, endpoint: string): string {
-  const base = String(baseUrl || '').trim()
-  if (!base) return ''
-
-  try {
-    const url = new URL(base)
-    const pathname = url.pathname.replace(/\/+$/, '')
-    if (isCompleteEndpoint(pathname, endpoint)) return base.replace(/\/+$/, '')
-
-    const suffix = pathname.endsWith('/v1') && endpoint.startsWith('/v1/')
-      ? endpoint.slice(3)
-      : endpoint
-    url.pathname = `${pathname}${suffix}`
-    return url.toString()
-  } catch {
-    const normalized = base.replace(/\/+$/, '')
-    if (isCompleteEndpoint(normalized, endpoint)) return normalized
-    if (normalized.endsWith('/v1') && endpoint.startsWith('/v1/')) {
-      return normalized + endpoint.slice(3)
-    }
-    return normalized + endpoint
+function createTranslationFallback(
+  title: string,
+  markdown: string,
+  reason: LlmTranslateFallbackReason,
+  timeoutSeconds: number,
+  detail?: string,
+): LlmTranslateResult {
+  return {
+    title,
+    markdown,
+    status: 'fallback',
+    fallbackReason: reason,
+    notice: formatTranslationFallbackNotice(title, reason, timeoutSeconds, detail),
   }
 }
 
-function isCompleteEndpoint(pathname: string, endpoint: string) {
-  if (pathname.endsWith(endpoint)) return true
-  if (endpoint.endsWith('/chat/completions')) return pathname.endsWith('/chat/completions')
-  if (endpoint.endsWith('/messages')) return pathname.endsWith('/messages')
-  return false
-}
+function formatTranslationFallbackNotice(
+  title: string,
+  reason: LlmTranslateFallbackReason,
+  timeoutSeconds: number,
+  detail?: string,
+) {
+  const normalizedTitle = title.replace(/\s+/g, ' ').trim()
+  const displayTitle = normalizedTitle.length > 48 ? `${normalizedTitle.slice(0, 45)}...` : normalizedTitle
+  const subject = displayTitle ? `“${displayTitle}”` : '本条新闻'
 
-function unexpectedTextResponse(protocol: string, response: string) {
-  const responseType = /^\s*</.test(response) ? 'HTML' : 'plain text'
-  return new Error(`${protocol} endpoint returned ${responseType} instead of JSON; check llmApiEndpoint and llmApiFormat`)
+  switch (reason) {
+    case 'configuration':
+      return `${subject}的 LLM 翻译配置不可用${detail ? `（${detail}）` : ''}，已发送原文。`
+    case 'timeout':
+      return `${subject}的 LLM 翻译在 ${timeoutSeconds} 秒后超时，已发送原文。`
+    case 'truncated':
+      return `${subject}的 LLM 翻译达到输出上限，已发送原文；请提高 llmMaxTokens 或关闭模型思考。`
+    case 'invalid-response':
+      return `${subject}的 LLM 翻译响应格式无效，已发送原文。`
+    default:
+      return `${subject}的 LLM 翻译请求失败，已发送原文。`
+  }
 }
 
 function buildSummaryInput(items: LlmSummaryInput[]) {
@@ -417,50 +434,4 @@ function truncateSource(input: string, limit: number) {
   if (normalized.length <= limit) return normalized
   if (limit <= 3) return normalized.slice(0, limit)
   return `${normalized.slice(0, limit - 3).trimEnd()}...`
-}
-
-function readOpenAiContent(content: string | OpenAiTextBlock[] | undefined) {
-  if (typeof content === 'string') return content.trim()
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text)
-    .join('\n')
-    .trim()
-}
-
-function stripMarkdownFence(input: string) {
-  const trimmed = input.trim()
-  const match = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i)
-  return match ? match[1] : trimmed
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-function parseJsonObject(input: string) {
-  const cleaned = input
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim()
-
-  try {
-    return JSON.parse(cleaned)
-  } catch {
-    const start = cleaned.indexOf('{')
-    const end = cleaned.lastIndexOf('}')
-    if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1))
-    throw new Error('translation response is not valid JSON')
-  }
-}
-
-function shouldRetryWithMaxCompletionTokens(error: unknown) {
-  const rendered = formatError(error).toLowerCase()
-  return rendered.includes('max_tokens') && [
-    'unsupported',
-    'not supported',
-    'unknown parameter',
-    'incompatible',
-  ].some((keyword) => rendered.includes(keyword))
 }
